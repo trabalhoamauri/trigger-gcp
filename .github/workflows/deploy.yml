@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+    workflow_dispatch:
 
 jobs:
   deploy:
@@ -45,6 +46,7 @@ jobs:
           gcloud builds submit \
             --tag $IMAGE_NAME:${{ github.sha }} \
             --tag $IMAGE_NAME:latest
+            --suppress-logs
 
       # Passo 6 — Faz o deploy da nova imagem no Cloud Run
       - name: Deploy no Cloud Run
