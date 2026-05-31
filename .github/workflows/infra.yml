@@ -1,0 +1,137 @@
+name: Infrastructure Setup
+
+# Esse workflow roda MANUALMENTE
+# Acesse: Actions → Infrastructure Setup → Run workflow
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Ação a executar'
+        required: true
+        default: 'create'
+        type: choice
+        options:
+          - create
+          - destroy
+
+jobs:
+  infrastructure:
+    name: ${{ github.event.inputs.action == 'create' && 'Criar Infraestrutura' || 'Destruir Infraestrutura' }}
+    runs-on: ubuntu-latest
+
+    env:
+      PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      REGION: us-central1
+      BUCKET_NAME: bullla-incoming-mastercard-dev
+      SERVICE_NAME: bullla-gcs-trigger
+      SA_NAME: bullla-incoming-sa
+      TRIGGER_NAME: bullla-incoming-trigger
+      REPO_NAME: bullla-incoming-repo
+
+    steps:
+      # Passo 1 — Autentica no GCP usando a chave JSON que salvamos nos secrets
+      - name: Autenticar no GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      # Passo 2 — Configura o gcloud CLI
+      - name: Configurar gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      # ─────────────────────────────────────────
+      # CREATE — cria toda a infraestrutura
+      # ─────────────────────────────────────────
+      - name: Habilitar APIs
+        if: github.event.inputs.action == 'create'
+        run: |
+          gcloud services enable \
+            storage.googleapis.com \
+            eventarc.googleapis.com \
+            run.googleapis.com \
+            cloudbuild.googleapis.com \
+            artifactregistry.googleapis.com
+
+      - name: Criar Artifact Registry
+        if: github.event.inputs.action == 'create'
+        run: |
+          gcloud artifacts repositories create $REPO_NAME \
+            --repository-format=docker \
+            --location=$REGION \
+            --description="Bullla Incoming Mastercard" \
+            --quiet || echo "Repositório já existe"
+
+      - name: Criar Bucket GCS
+        if: github.event.inputs.action == 'create'
+        run: |
+          gcloud storage buckets create gs://$BUCKET_NAME \
+            --location=$REGION || echo "Bucket já existe"
+
+      - name: Criar Service Account
+        if: github.event.inputs.action == 'create'
+        run: |
+          gcloud iam service-accounts create $SA_NAME \
+            --display-name="Bullla Incoming Service Account" \
+            --quiet || echo "Service Account já existe"
+
+      - name: Configurar permissões da Service Account
+        if: github.event.inputs.action == 'create'
+        run: |
+          gcloud projects add-iam-policy-binding $PROJECT_ID \
+            --member="serviceAccount:$SA_NAME@$PROJECT_ID.iam.gserviceaccount.com" \
+            --role="roles/run.invoker"
+
+          gcloud projects add-iam-policy-binding $PROJECT_ID \
+            --member="serviceAccount:$SA_NAME@$PROJECT_ID.iam.gserviceaccount.com" \
+            --role="roles/eventarc.eventReceiver"
+
+          gcloud projects add-iam-policy-binding $PROJECT_ID \
+            --member="serviceAccount:$SA_NAME@$PROJECT_ID.iam.gserviceaccount.com" \
+            --role="roles/storage.objectViewer"
+
+      - name: Criar trigger do Eventarc
+        if: github.event.inputs.action == 'create'
+        run: |
+          gcloud eventarc triggers create $TRIGGER_NAME \
+            --location=$REGION \
+            --destination-run-service=$SERVICE_NAME \
+            --destination-run-region=$REGION \
+            --destination-run-path=/gcs/event \
+            --event-filters="type=google.cloud.storage.object.v1.finalized" \
+            --event-filters="bucket=$BUCKET_NAME" \
+            --service-account=$SA_NAME@$PROJECT_ID.iam.gserviceaccount.com \
+            --quiet || echo "Trigger já existe"
+
+      # ─────────────────────────────────────────
+      # DESTROY — destroi toda a infraestrutura
+      # ─────────────────────────────────────────
+      - name: Deletar trigger do Eventarc
+        if: github.event.inputs.action == 'destroy'
+        run: |
+          gcloud eventarc triggers delete $TRIGGER_NAME \
+            --location=$REGION --quiet || echo "Trigger não encontrada"
+
+      - name: Deletar Cloud Run
+        if: github.event.inputs.action == 'destroy'
+        run: |
+          gcloud run services delete $SERVICE_NAME \
+            --region=$REGION --quiet || echo "Serviço não encontrado"
+
+      - name: Deletar Artifact Registry
+        if: github.event.inputs.action == 'destroy'
+        run: |
+          gcloud artifacts repositories delete $REPO_NAME \
+            --location=$REGION --quiet || echo "Repositório não encontrado"
+
+      - name: Deletar Bucket GCS
+        if: github.event.inputs.action == 'destroy'
+        run: |
+          gcloud storage rm -r gs://$BUCKET_NAME || echo "Bucket não encontrado"
+
+      - name: Deletar Service Account
+        if: github.event.inputs.action == 'destroy'
+        run: |
+          gcloud iam service-accounts delete $SA_NAME@$PROJECT_ID.iam.gserviceaccount.com \
+            --quiet || echo "Service Account não encontrada"
