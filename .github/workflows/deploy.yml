@@ -1,0 +1,57 @@
+name: Deploy Application
+
+# Esse workflow roda automaticamente a cada push na branch main
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: Build e Deploy
+    runs-on: ubuntu-latest
+
+    env:
+      PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      REGION: us-central1
+      SERVICE_NAME: bullla-gcs-trigger
+      REPO_NAME: bullla-incoming-repo
+      IMAGE_NAME: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/bullla-incoming-repo/bullla-gcs-trigger
+
+    steps:
+      # Passo 1 — Baixa o código do repositório
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      # Passo 2 — Autentica no GCP usando a chave JSON que salvamos nos secrets
+      - name: Autenticar no GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      # Passo 3 — Configura o gcloud CLI
+      - name: Configurar gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      # Passo 4 — Autentica o Docker para enviar imagem ao Artifact Registry
+      - name: Autenticar Docker no Artifact Registry
+        run: gcloud auth configure-docker $REGION-docker.pkg.dev --quiet
+
+      # Passo 5 — Builda a imagem Docker e sobe no Artifact Registry
+      - name: Build e Push da imagem Docker
+        run: |
+          gcloud builds submit \
+            --tag $IMAGE_NAME:${{ github.sha }} \
+            --tag $IMAGE_NAME:latest
+
+      # Passo 6 — Faz o deploy da nova imagem no Cloud Run
+      - name: Deploy no Cloud Run
+        run: |
+          gcloud run deploy $SERVICE_NAME \
+            --image=$IMAGE_NAME:${{ github.sha }} \
+            --region=$REGION \
+            --service-account=bullla-incoming-sa@$PROJECT_ID.iam.gserviceaccount.com \
+            --no-allow-unauthenticated \
+            --quiet
